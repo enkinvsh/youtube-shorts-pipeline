@@ -1,43 +1,20 @@
-"""Claude script generation."""
+"""Script generation via Gemini (cliproxyapi) or Claude fallback."""
 
 import json
 
-from .config import get_anthropic_client, get_claude_backend, call_claude_cli
+from .config import (
+    get_gemini_chat_client,
+    GEMINI_CHAT_MODEL,
+    get_claude_backend,
+    get_anthropic_client,
+    call_claude_cli,
+)
 from .log import log
 from .research import research_topic
 from .retry import with_retry
 
 
-@with_retry(max_retries=2, base_delay=3.0)
-def _call_claude(prompt: str) -> str:
-    """Call Claude via API key or CLI (Claude Max).
-
-    Uses ANTHROPIC_API_KEY if set, otherwise falls back to `claude` CLI
-    which uses Claude Max subscription auth.
-    """
-    backend = get_claude_backend()
-
-    if backend == "api":
-        client = get_anthropic_client()
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text.strip()
-    else:
-        # Claude Max via CLI
-        log("Using Claude Max (CLI) for script generation...")
-        return call_claude_cli(prompt)
-
-
-def generate_draft(news: str, channel_context: str = "") -> dict:
-    """Research topic + generate draft via Claude."""
-    research = research_topic(news)
-
-    channel_note = f"\nChannel context: {channel_context}" if channel_context else ""
-
-    prompt = f"""You are writing a YouTube Short script (60-90 seconds spoken, ~150-180 words).{channel_note}
+PROMPT_EN = """You are writing a YouTube Short script (60-90 seconds spoken, ~150-180 words).{channel_note}
 
 NEWS/TOPIC: {news}
 
@@ -63,7 +40,70 @@ Output JSON exactly:
   "thumbnail_prompt": "..."
 }}"""
 
-    raw = _call_claude(prompt)
+
+PROMPT_RU = """Ты пишешь сценарий для YouTube Shorts / TikTok / Reels (30-60 секунд, ~80-120 слов).{channel_note}
+
+НОВОСТЬ: {news}
+
+РЕЗУЛЬТАТЫ ИССЛЕДОВАНИЯ (используй ТОЛЬКО факты отсюда — никогда не выдумывай):
+--- BEGIN RESEARCH DATA ---
+{research}
+--- END RESEARCH DATA ---
+
+ПРАВИЛА:
+- Антигаллюцинация: используй только имена, цифры и события из исследования выше
+- Цепляющий хук в первые 3 секунды — вопрос, шокирующий факт или провокация
+- Разговорный стиль, как будто рассказываешь другу — без канцелярита
+- Призыв к действию в конце ("Подписывайся", "Пиши в комменты")
+- Промпты для b-roll и thumbnail пиши НА АНГЛИЙСКОМ (для генерации изображений)
+
+Выдай JSON:
+{{
+  "script": "текст сценария на русском...",
+  "broll_prompts": ["English prompt for frame 1", "English prompt for frame 2", "English prompt for frame 3"],
+  "youtube_title": "заголовок на русском...",
+  "youtube_description": "описание на русском...",
+  "youtube_tags": "тег1,тег2,тег3",
+  "instagram_caption": "подпись на русском с эмодзи...",
+  "thumbnail_prompt": "English prompt for thumbnail image"
+}}"""
+
+
+@with_retry(max_retries=2, base_delay=3.0)
+def _call_llm(prompt: str, lang: str = "en") -> str:
+    """Route to Gemini (cliproxyapi) for Russian, Claude for English."""
+    if lang == "ru":
+        client = get_gemini_chat_client()
+        resp = client.chat.completions.create(
+            model=GEMINI_CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2000,
+        )
+        return resp.choices[0].message.content.strip()
+
+    backend = get_claude_backend()
+    if backend == "api":
+        client = get_anthropic_client()
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    else:
+        log("Using Claude Max (CLI) for script generation...")
+        return call_claude_cli(prompt)
+
+
+def generate_draft(news: str, channel_context: str = "", lang: str = "en") -> dict:
+    """Research topic + generate draft."""
+    research = research_topic(news)
+    channel_note = f"\nChannel context: {channel_context}" if channel_context else ""
+
+    template = PROMPT_RU if lang == "ru" else PROMPT_EN
+    prompt = template.format(news=news, research=research, channel_note=channel_note)
+
+    raw = _call_llm(prompt, lang=lang)
 
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -73,10 +113,13 @@ Output JSON exactly:
 
     draft = json.loads(raw)
 
-    # Validate and sanitize LLM output fields
     expected_str_fields = [
-        "script", "youtube_title", "youtube_description",
-        "youtube_tags", "instagram_caption", "thumbnail_prompt",
+        "script",
+        "youtube_title",
+        "youtube_description",
+        "youtube_tags",
+        "instagram_caption",
+        "thumbnail_prompt",
     ]
     for field in expected_str_fields:
         if field in draft and not isinstance(draft[field], str):

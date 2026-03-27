@@ -27,13 +27,65 @@ VIDEO_HEIGHT = 1920
 # ─────────────────────────────────────────────────────
 VOICE_ID_EN = os.environ.get("VOICE_ID_EN", "JBFqnCBsd6RMkjVDRZzb")  # George
 VOICE_ID_HI = os.environ.get("VOICE_ID_HI", "JBFqnCBsd6RMkjVDRZzb")
+VOICE_RU = os.environ.get("VOICE_RU", "ru-RU-SvetlanaNeural")
+
+# ─────────────────────────────────────────────────────
+# Gemini chat config (for script generation via cliproxyapi)
+# ─────────────────────────────────────────────────────
+GEMINI_CHAT_ENDPOINT = os.environ.get(
+    "GEMINI_CHAT_ENDPOINT", "http://127.0.0.1:8317/v1"
+)
+GEMINI_CHAT_MODEL = os.environ.get("GEMINI_CHAT_MODEL", "gemini-3-flash-preview")
+GEMINI_CHAT_API_KEY = os.environ.get(
+    "GEMINI_CHAT_API_KEY",
+    "sk-d3e7b34b1b5a6c414225daaa667721ff5b74e90a7435fd08b8ec38390f160edb",
+)
 
 STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of",
-    "with", "from", "by", "is", "are", "was", "were", "be", "been", "has", "have",
-    "had", "will", "would", "could", "should", "may", "might", "that", "this",
-    "these", "those", "it", "its", "new", "ahead", "as", "into", "up", "out",
-    "over", "after",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "from",
+    "by",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "has",
+    "have",
+    "had",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "that",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "new",
+    "ahead",
+    "as",
+    "into",
+    "up",
+    "out",
+    "over",
+    "after",
 }
 
 
@@ -41,11 +93,6 @@ STOPWORDS = {
 # Utilities
 # ─────────────────────────────────────────────────────
 def write_secret_file(path: Path, content: str):
-    """Write a file with 0600 permissions (owner read/write only).
-
-    Uses os.open() with explicit mode to avoid a TOCTOU race where the file
-    briefly exists with default (world-readable) permissions.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -70,7 +117,6 @@ def extract_keywords(text: str) -> str:
 # API key resolution — env → config.json
 # ─────────────────────────────────────────────────────
 def _get_key(name: str) -> str:
-    """Resolve an API key: environment variable first, then config.json."""
     val = os.environ.get(name)
     if val:
         return val
@@ -96,13 +142,12 @@ CLAUDE_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
 
 
 def has_claude_cli() -> bool:
-    """Check if the `claude` CLI is available (Claude Code / Claude Max)."""
     import shutil
+
     return shutil.which("claude") is not None
 
 
 def _has_claude_max_credentials() -> bool:
-    """Check if Claude Max OAuth credentials exist."""
     if not CLAUDE_CREDENTIALS.exists():
         return False
     try:
@@ -112,18 +157,17 @@ def _has_claude_max_credentials() -> bool:
         return False
 
 
-def call_claude_cli(prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 1500) -> str:
-    """Call Claude via the `claude` CLI (uses Claude Max subscription).
-
-    Uses `claude -p <prompt> --model <model>` for non-interactive mode.
-    No API key needed — uses Claude Max auth.
-    """
+def call_claude_cli(
+    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 1500
+) -> str:
     import shutil
+
     claude_path = shutil.which("claude")
     if not claude_path:
-        raise RuntimeError("claude CLI not found. Install Claude Code or set ANTHROPIC_API_KEY.")
+        raise RuntimeError(
+            "claude CLI not found. Install Claude Code or set ANTHROPIC_API_KEY."
+        )
 
-    # Strip CLAUDECODE env var to allow running from within a Claude Code session
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
     r = subprocess.run(
@@ -136,17 +180,12 @@ def call_claude_cli(prompt: str, model: str = "claude-sonnet-4-6", max_tokens: i
     if r.returncode != 0:
         raise RuntimeError(f"claude CLI failed: {r.stderr[:300]}")
     output = r.stdout.strip()
-    # Claude CLI may append "Error: Reached max turns" — strip it
     if output.endswith("Error: Reached max turns (3)"):
         output = output[: -len("Error: Reached max turns (3)")].strip()
     return output
 
 
 def get_anthropic_client():
-    """Create an Anthropic client if an API key is available.
-
-    Returns the client, or None if no API key (caller should use call_claude_cli).
-    """
     import anthropic
 
     api_key = get_anthropic_key()
@@ -157,11 +196,6 @@ def get_anthropic_client():
 
 
 def get_claude_backend() -> str:
-    """Determine which Claude backend to use.
-
-    Returns: "api" if ANTHROPIC_API_KEY is set, "cli" if claude CLI is available.
-    Raises RuntimeError if neither is available.
-    """
     if get_anthropic_key():
         return "api"
     if has_claude_cli() and _has_claude_max_credentials():
@@ -170,6 +204,16 @@ def get_claude_backend() -> str:
         "No Claude access found. Either:\n"
         "  1. Set ANTHROPIC_API_KEY in env or ~/.youtube-shorts-pipeline/config.json\n"
         "  2. Log in to Claude Code (claude login) with a Claude Max subscription"
+    )
+
+
+def get_gemini_chat_client():
+    """OpenAI-compatible client pointing at cliproxyapi for Gemini chat."""
+    from openai import OpenAI
+
+    return OpenAI(
+        base_url=GEMINI_CHAT_ENDPOINT,
+        api_key=GEMINI_CHAT_API_KEY,
     )
 
 
@@ -192,7 +236,6 @@ def get_youtube_token_path() -> Path:
 
 
 def load_config() -> dict:
-    """Load the full config.json, including topic_sources."""
     if CONFIG_FILE.exists():
         try:
             return json.loads(CONFIG_FILE.read_text())
@@ -202,7 +245,6 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
-    """Save config.json with restricted permissions."""
     SKILL_DIR.mkdir(parents=True, exist_ok=True)
     write_secret_file(CONFIG_FILE, json.dumps(config, indent=2))
 
@@ -211,7 +253,6 @@ def save_config(config: dict):
 # First-run interactive setup
 # ─────────────────────────────────────────────────────
 def run_setup():
-    """Interactive first-run setup — saves config.json and runs YouTube OAuth."""
     print("\n" + "=" * 60)
     print("  YouTube Shorts Pipeline — First-Run Setup")
     print("=" * 60)
@@ -222,14 +263,16 @@ def run_setup():
 
     config = {}
 
-    print("1. Anthropic API key (required — used for Claude script generation)")
+    print("1. Anthropic API key (optional — used for Claude script generation)")
     print("   Get yours at: https://console.anthropic.com/settings/keys")
-    key = input("   ANTHROPIC_API_KEY: ").strip()
+    key = input("   ANTHROPIC_API_KEY (press Enter to skip for Gemini): ").strip()
     if key:
         config["ANTHROPIC_API_KEY"] = key
 
-    print("\n2. ElevenLabs API key (optional — fallback to macOS 'say' if omitted)")
-    print("   Pro account required for server use. https://elevenlabs.io/settings/api-keys")
+    print("\n2. ElevenLabs API key (optional — fallback to edge-tts if omitted)")
+    print(
+        "   Pro account required for server use. https://elevenlabs.io/settings/api-keys"
+    )
     key = input("   ELEVENLABS_API_KEY (press Enter to skip): ").strip()
     if key:
         config["ELEVENLABS_API_KEY"] = key
@@ -248,14 +291,20 @@ def run_setup():
     print("   See references/setup.md for step-by-step instructions.")
     run_oauth = input("\n   Run YouTube OAuth now? (y/N): ").strip().lower()
     if run_oauth == "y":
-        oauth_script = Path(__file__).resolve().parent.parent / "scripts" / "setup_youtube_oauth.py"
+        oauth_script = (
+            Path(__file__).resolve().parent.parent
+            / "scripts"
+            / "setup_youtube_oauth.py"
+        )
         if oauth_script.exists():
             subprocess.run([sys.executable, str(oauth_script)])
         else:
             print(f"   OAuth script not found at {oauth_script}")
             print("   Run it manually: python3 scripts/setup_youtube_oauth.py")
     else:
-        print("   Skipping — run 'python3 scripts/setup_youtube_oauth.py' before uploading.")
+        print(
+            "   Skipping — run 'python3 scripts/setup_youtube_oauth.py' before uploading."
+        )
 
     print("\n  Setup complete! Re-run your pipeline command to continue.\n")
     sys.exit(0)

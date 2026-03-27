@@ -9,6 +9,9 @@ from .config import CONFIG_FILE, DRAFTS_DIR, MEDIA_DIR, run_setup
 from .log import log, set_verbose
 
 
+LANG_CHOICES = ["en", "hi", "ru"]
+
+
 def cmd_draft(args):
     from .draft import generate_draft
     from .state import PipelineState
@@ -18,7 +21,9 @@ def cmd_draft(args):
     job_id = str(int(time.time()))
 
     print(f"\n  Drafting: {args.news}\n")
-    draft = generate_draft(args.news, getattr(args, "context", ""))
+    draft = generate_draft(
+        args.news, getattr(args, "context", ""), lang=getattr(args, "lang", "en")
+    )
     draft["job_id"] = job_id
 
     out_path = DRAFTS_DIR / f"{job_id}.json"
@@ -32,7 +37,7 @@ def cmd_draft(args):
     print(f"\n  Title: {draft.get('youtube_title', '')}")
     print(f"\n  B-roll prompts:")
     for i, p in enumerate(draft.get("broll_prompts", [])):
-        print(f"  {i+1}. {p}")
+        print(f"  {i + 1}. {p}")
 
     return out_path
 
@@ -64,15 +69,15 @@ def cmd_produce(args):
 
     print(f"\n  Producing {lang.upper()} video for job {job_id}")
 
-    # B-roll
     if force or not state.is_done("broll"):
-        frames = generate_broll(draft.get("broll_prompts", ["Cinematic landscape"] * 3), work_dir)
+        frames = generate_broll(
+            draft.get("broll_prompts", ["Cinematic landscape"] * 3), work_dir
+        )
         state.complete_stage("broll", {"frames": [str(f) for f in frames]})
     else:
         log("Skipping b-roll (already done)")
         frames = [Path(f) for f in state.get_artifact("broll", "frames", [])]
 
-    # Voiceover
     if force or not state.is_done("voiceover"):
         vo_path = generate_voiceover(script, work_dir, lang)
         state.complete_stage("voiceover", {"path": str(vo_path)})
@@ -80,13 +85,15 @@ def cmd_produce(args):
         log("Skipping voiceover (already done)")
         vo_path = Path(state.get_artifact("voiceover", "path"))
 
-    # Whisper + Captions
     if force or not state.is_done("captions"):
         captions_result = generate_captions(vo_path, work_dir, lang)
-        state.complete_stage("captions", {
-            "srt_path": str(captions_result.get("srt_path", "")),
-            "ass_path": str(captions_result.get("ass_path", "")),
-        })
+        state.complete_stage(
+            "captions",
+            {
+                "srt_path": str(captions_result.get("srt_path", "")),
+                "ass_path": str(captions_result.get("ass_path", "")),
+            },
+        )
     else:
         log("Skipping captions (already done)")
         captions_result = {
@@ -94,13 +101,15 @@ def cmd_produce(args):
             "ass_path": state.get_artifact("captions", "ass_path", ""),
         }
 
-    # Music
     if force or not state.is_done("music"):
         music_result = select_and_prepare_music(vo_path, work_dir)
-        state.complete_stage("music", {
-            "track_path": str(music_result.get("track_path", "")),
-            "duck_filter": music_result.get("duck_filter", ""),
-        })
+        state.complete_stage(
+            "music",
+            {
+                "track_path": str(music_result.get("track_path", "")),
+                "duck_filter": music_result.get("duck_filter", ""),
+            },
+        )
     else:
         log("Skipping music (already done)")
         music_result = {
@@ -108,7 +117,6 @@ def cmd_produce(args):
             "duck_filter": state.get_artifact("music", "duck_filter", ""),
         }
 
-    # Assemble
     if force or not state.is_done("assemble"):
         video_path = assemble_video(
             frames=frames,
@@ -125,7 +133,6 @@ def cmd_produce(args):
         log("Skipping assembly (already done)")
         video_path = Path(state.get_artifact("assemble", "video_path"))
 
-    # Save SRT to media dir
     srt_path = captions_result.get("srt_path")
     if srt_path and Path(srt_path).exists():
         final_srt = MEDIA_DIR / f"pipeline_{job_id}_{lang}.srt"
@@ -159,7 +166,6 @@ def cmd_upload(args):
         print(f"  No produced video found for lang={lang}. Run produce first.")
         sys.exit(1)
 
-    # Thumbnail
     thumb_path = None
     if force or not state.is_done("thumbnail"):
         try:
@@ -172,7 +178,6 @@ def cmd_upload(args):
         if thumb_p and Path(thumb_p).exists():
             thumb_path = Path(thumb_p)
 
-    # Upload
     if force or not state.is_done("upload"):
         url = upload_to_youtube(video_path, draft, srt_path, lang, thumb_path)
         state.complete_stage("upload", {"url": url})
@@ -192,7 +197,6 @@ def cmd_run(args):
         print("  Dry run — skipping produce + upload")
         return
 
-    # Monkey-patch args for produce/upload
     class ProduceArgs:
         draft = str(draft_path)
         lang = args.lang
@@ -201,6 +205,11 @@ def cmd_run(args):
 
     video_path = cmd_produce(ProduceArgs())
 
+    if getattr(args, "no_upload", False):
+        _maybe_send_telegram(video_path, args)
+        print(f"\n  Done (no upload): {video_path}")
+        return video_path
+
     class UploadArgs:
         draft = str(draft_path)
         lang = args.lang
@@ -208,6 +217,70 @@ def cmd_run(args):
 
     url = cmd_upload(UploadArgs())
     print(f"\n  Done! {url}")
+
+
+def cmd_from_newsbot(args):
+    """Full automated pipeline: pick article from newsbot DB → generate video → send to Telegram."""
+    from .newsbot_source import get_next_article, mark_video_generated
+
+    article = get_next_article()
+    if not article:
+        print("  No unprocessed articles available. Nothing to do.")
+        return
+
+    news_topic = article.headline_ru or article.title
+    article_context_parts = []
+    if article.tiktok_hook:
+        article_context_parts.append(f"Hook: {article.tiktok_hook}")
+    if article.hot_take:
+        article_context_parts.append(f"Take: {article.hot_take}")
+    if article.summary_ru:
+        article_context_parts.append(f"Summary: {article.summary_ru}")
+    article_context = "\n".join(article_context_parts)
+
+    print(f"\n  [newsbot] Article #{article.id}: {news_topic}")
+    print(f"  [newsbot] Score: {article.score}, Source: {article.source_name}")
+
+    class RunArgs:
+        news = news_topic
+        lang = "ru"
+        dry_run = False
+        no_upload = True
+        context = article_context
+        discover = False
+        auto_pick = False
+
+    draft_path = cmd_draft(RunArgs())
+
+    class ProduceArgs:
+        draft = str(draft_path)
+        lang = "ru"
+        script = None
+        force = False
+
+    video_path = cmd_produce(ProduceArgs())
+
+    _send_telegram(
+        video_path,
+        caption=f"<b>{news_topic}</b>\n\nScore: {article.score:.1f} | {article.source_name}",
+    )
+
+    mark_video_generated(article.content_hash)
+    print(f"\n  Done! Video sent to Telegram. Article marked as processed.")
+    return video_path
+
+
+def _maybe_send_telegram(video_path, args):
+    if getattr(args, "telegram", False) and video_path:
+        news = getattr(args, "news", "")
+        _send_telegram(video_path, caption=f"<b>{news}</b>")
+
+
+def _send_telegram(video_path, caption: str = ""):
+    from .telegram import send_video
+
+    if video_path and Path(video_path).exists():
+        send_video(Path(video_path), caption=caption)
 
 
 def cmd_topics(args):
@@ -237,40 +310,63 @@ def main():
         description="YouTube Shorts Pipeline v2 — AI-Native Content Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable debug logging"
+    )
     sub = parser.add_subparsers(dest="cmd")
 
-    # draft
     p_draft = sub.add_parser("draft", help="Generate script + metadata")
     p_draft.add_argument("--news", required=False, help="Topic/news headline")
     p_draft.add_argument("--context", default="", help="Channel context")
-    p_draft.add_argument("--discover", action="store_true", help="Use topic engine instead of --news")
-    p_draft.add_argument("--auto-pick", action="store_true", help="Let Claude pick the best topic")
-    p_draft.add_argument("--dry-run", action="store_true", help="Draft only, skip produce")
+    p_draft.add_argument("--lang", default="en", choices=LANG_CHOICES)
+    p_draft.add_argument(
+        "--discover", action="store_true", help="Use topic engine instead of --news"
+    )
+    p_draft.add_argument(
+        "--auto-pick", action="store_true", help="Let LLM pick the best topic"
+    )
+    p_draft.add_argument(
+        "--dry-run", action="store_true", help="Draft only, skip produce"
+    )
 
-    # produce
     p_produce = sub.add_parser("produce", help="Generate video from draft")
     p_produce.add_argument("--draft", required=True)
-    p_produce.add_argument("--lang", default="en", choices=["en", "hi"])
+    p_produce.add_argument("--lang", default="en", choices=LANG_CHOICES)
     p_produce.add_argument("--script", default=None, help="Override script text")
     p_produce.add_argument("--force", action="store_true", help="Redo all stages")
 
-    # upload
     p_upload = sub.add_parser("upload", help="Upload to YouTube")
     p_upload.add_argument("--draft", required=True)
-    p_upload.add_argument("--lang", default="en", choices=["en", "hi"])
+    p_upload.add_argument("--lang", default="en", choices=LANG_CHOICES)
     p_upload.add_argument("--force", action="store_true", help="Re-upload even if done")
 
-    # run (full pipeline)
     p_run = sub.add_parser("run", help="Full pipeline: draft -> produce -> upload")
     p_run.add_argument("--news", required=False, help="Topic/news headline")
-    p_run.add_argument("--lang", default="en", choices=["en", "hi"])
+    p_run.add_argument("--lang", default="en", choices=LANG_CHOICES)
     p_run.add_argument("--dry-run", action="store_true")
+    p_run.add_argument("--no-upload", action="store_true", help="Skip YouTube upload")
+    p_run.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Send video to Telegram after production",
+    )
     p_run.add_argument("--context", default="")
     p_run.add_argument("--discover", action="store_true")
     p_run.add_argument("--auto-pick", action="store_true")
 
-    # topics
+    p_newsbot = sub.add_parser(
+        "from-newsbot",
+        help="Auto-pick article from newsbot DB, generate video, send to Telegram",
+    )
+    p_newsbot.add_argument(
+        "--db",
+        default=None,
+        help="Path to newsbot SQLite DB (default: ~/newsbot/data/news.db)",
+    )
+    p_newsbot.add_argument(
+        "--count", type=int, default=1, help="Number of videos to generate (default: 1)"
+    )
+
     p_topics = sub.add_parser("topics", help="Discover trending topics")
     p_topics.add_argument("--limit", type=int, default=15, help="Max topics to show")
 
@@ -283,9 +379,19 @@ def main():
         parser.print_help()
         return
 
-    # Handle --discover flag for draft/run
+    if args.cmd == "from-newsbot":
+        count = getattr(args, "count", 1)
+        for i in range(count):
+            if count > 1:
+                print(f"\n{'=' * 50}")
+                print(f"  Video {i + 1}/{count}")
+                print(f"{'=' * 50}")
+            cmd_from_newsbot(args)
+        return
+
     if args.cmd in ("draft", "run") and getattr(args, "discover", False):
         from .topics import TopicEngine
+
         engine = TopicEngine()
         candidates = engine.discover(limit=15)
         if not candidates:
