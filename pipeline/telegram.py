@@ -7,9 +7,7 @@ import requests
 
 from .log import log
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN", "8251221227:AAHSSPgbJOkqxNa1mYgxJJ80-zvgSuxfQw4"
-)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1003845353455")
 # AI Новости topic = 32
 TELEGRAM_TOPIC_ID = int(os.environ.get("TELEGRAM_TOPIC_ID", "32"))
